@@ -1,0 +1,130 @@
+# NOTE: This is an intermediate version for Phase 1. 
+# For the full feature set (Velocity & Drift), run the root 'main.py'.
+
+import cv2
+import numpy as np
+import os
+from ultralytics import YOLO
+from collections import defaultdict
+
+class AerialGuardian:
+    def __init__(self, model_path='yolov8n.pt', imgsz=1280, conf=0.15):
+        """
+        Phase 0 & 1.1: Initialization of the C4ISR Vision Engine
+        """
+        # Load Phase 0: The "Nano" model optimized for UAV inference
+        self.model = YOLO(model_path)
+        
+        # Configuration settings from Phase 1.1
+        self.imgsz = imgsz
+        self.conf = conf
+        self.classes = [0] # Tracking only 'Person' for now
+        
+        # Phase 1.1: Memory Initialization (Trajectories)
+        self.track_history = defaultdict(lambda: [])
+        
+        # Phase 1.2: Robust Tracking State (Memory Management)
+        self.last_seen = {}
+        self.MAX_HISTORY = 24  # 1 second at 24 FPS
+        self.GRACE_PERIOD = 60 # ID lifespan after disappearance
+        
+    def process_frame_logic(self, frame, results, frame_idx):
+        """
+        Integrates Phase 1.1 (Trajectories) and Phase 1.2 (Robust Management)
+        """
+        # 1. Base Annotation from YOLO
+        annotated_frame = results[0].plot()
+        
+        # 2. Check if we found detections with persistent IDs
+        if results[0].boxes.id is not None:
+            boxes = results[0].boxes.xywh.cpu().numpy()
+            track_ids = results[0].boxes.id.int().cpu().tolist()
+            
+            for box, track_id in zip(boxes, track_ids):
+                x, y, w, h = box
+                # Phase 1.1: Stable "Bottom-Center" (feet) coordinates
+                feet_coords = (float(x), float(y + h/2))
+                
+                track = self.track_history[track_id]
+                
+                # Phase 1.2: TELEPORT FIX 
+                # Prevents "jump lines" across the screen if an object was missing
+                if track_id in self.last_seen and (frame_idx - self.last_seen[track_id] > 2):
+                    track.clear()
+                
+                # Update trajectory history
+                track.append(feet_coords)
+                self.last_seen[track_id] = frame_idx
+                
+                # Sliding window: maintain history length
+                if len(track) > self.MAX_HISTORY:
+                    track.pop(0)
+                
+                # 3. Phase 1.1 Drawing: Trajectory tail
+                if len(track) > 1:
+                    points = np.array(track).astype(np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(annotated_frame, [points], isClosed=False, 
+                                  color=(0, 255, 0), thickness=2)
+                                  
+        # Phase 1.2: MEMORY CLEANUP (The Garbage Collector)
+        # Every 48 frames, wipe stale IDs to conserve RAM (Essential for 300MB limit)
+        if frame_idx % 48 == 0:
+            all_ids = list(self.track_history.keys())
+            for tid in all_ids:
+                if frame_idx - self.last_seen.get(tid, 0) > self.GRACE_PERIOD:
+                    del self.track_history[tid]
+                    del self.last_seen[tid]
+                    
+        return annotated_frame
+
+    def run_pipeline(self, source_path, save_path='Phase1_2_Output.mp4', limit_frames=300):
+        """
+        The Main Execution Loop for Phases 0 - 1.2
+        """
+        print(f"🚀 Initializing Phase 1.2 Engine: {source_path}")
+        
+        # Run tracking stream
+        results = self.model.track(
+            source=source_path,
+            persist=True,
+            imgsz=self.imgsz,
+            classes=self.classes,
+            tracker="botsort.yaml",
+            stream=True,
+            conf=self.conf
+        )
+        
+        processed_frames = []
+        
+        for i, r in enumerate(results):
+            if i >= limit_frames: break
+            
+            # Process each frame using our class methods
+            annotated_frame = self.process_frame_logic(r.orig_img, [r], i)
+            processed_frames.append(annotated_frame)
+            
+            if i % 50 == 0:
+                print(f"Drawing Trajectories: Frame {i}/{limit_frames} processed...")
+
+        # Export Logic
+        if processed_frames:
+            h, w, _ = processed_frames[0].shape
+            video_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), 24.0, (w, h))
+            for f in processed_frames:
+                video_writer.write(f)
+            video_writer.release()
+            print(f"🏁 Success! Video saved to: {save_path}")
+
+# Usage setup
+if __name__ == "__main__":
+    DATA_PATH = "data/sequences/uav0000077_00720_v"
+    guardian = AerialGuardian()
+    guardian.run_pipeline(DATA_PATH)
+
+
+if not os.path.exists(DATA_PATH):
+        print(f"⚠️ Error: Directory '{DATA_PATH}' not found.")
+        print("Please update DATA_PATH in main.py to point to your VisDrone images.")
+    else:
+        guardian = AerialGuardian()
+        guardian.run_pipeline(DATA_PATH)

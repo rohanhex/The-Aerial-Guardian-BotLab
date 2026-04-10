@@ -1,0 +1,131 @@
+# NOTE: This is an intermediate version for Phase 2. 
+# For the full feature set (Velocity & Drift), run the root 'main.py'.
+
+
+import cv2
+import numpy as np
+import os
+from ultralytics import YOLO
+from collections import defaultdict
+
+class AerialGuardian:
+    def __init__(self, model_path='yolov8n.pt', width=1400, height=800):
+        """
+        Phase 0 & 1: Initialization
+        """
+        self.model = YOLO(model_path)
+        self.W, self.H = width, height
+        
+        # Phase 1.1 & 1.2: Tracking & Memory
+        self.track_history = defaultdict(lambda: [])
+        self.last_seen = {}
+        self.MAX_HISTORY = 24  # 1 second at 24 FPS
+        
+        # Phase 2: Geofencing & Drift State
+        self.zone_points = np.array([[550, 50], [750, 50], [900, 750], [350, 750]], np.int32)
+        self.offending_ids = set()
+        self.violation_count = 0
+        self.prev_gray = None
+        self.drone_drift = np.array([0, 0], dtype=np.float32)
+
+    def _calculate_drift(self, frame):
+        """Phase 2: Farneback Optical Flow for Drone Motion Correction"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.prev_gray is not None:
+            # Calculate pixel shift between frames
+            flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            # Focus on a center patch of the background/road
+            self.drone_drift = np.mean(flow[400:600, 400:1000], axis=(0, 1))
+        self.prev_gray = gray
+        return self.drone_drift
+
+    def _draw_geofence(self, frame):
+        """Phase 2: Visual Tint for the Red Zone"""
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [self.zone_points], (0, 0, 255))
+        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+        cv2.polylines(frame, [self.zone_points], True, (0, 0, 255), 3)
+
+    def process_sequence(self, input_path, output_name='Aerial_Guardian_Phase2.mp4'):
+        """Main Loop integrating Phase 1 & Phase 2"""
+        image_files = sorted([f for f in os.listdir(input_path) if f.endswith('.jpg')])
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_name, fourcc, 24.0, (self.W, self.H))
+
+        print(f"✅ Found {len(image_files)} images. Starting C4ISR Engine...")
+
+        for i, filename in enumerate(image_files[:800]):
+            frame = cv2.imread(os.path.join(input_path, filename))
+            if frame is None: continue
+            frame = cv2.resize(frame, (self.W, self.H))
+
+            # 1. Calculate Drone Movement
+            drift = self._calculate_drift(frame)
+
+            # 2. Setup Visuals
+            self._draw_geofence(frame)
+
+            # 3. YOLO Tracking
+            results = self.model.track(frame, persist=True, tracker='botsort.yaml', 
+                                     imgsz=1280, classes=[0, 2], conf=0.15, iou=0.25, verbose=False)
+
+            if results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                track_ids = results[0].boxes.id.int().cpu().tolist()
+
+                for box, track_id in zip(boxes, track_ids):
+                    x1, y1, x2, y2 = box
+                    feet_coords = (int((x1 + x2) / 2), int(y2))
+                    
+                    # Correcting for Drone Drift
+                    corrected_feet = (feet_coords[0] - drift[0], feet_coords[1] - drift[1])
+                    
+                    # --- Robust Tracking Guard ---
+                    track = self.track_history[track_id]
+                    dist = np.linalg.norm(np.array(feet_coords) - np.array(track[-1])) if track else 0
+                    
+                    if dist > 60: # Teleport Fix
+                        track.clear()
+                    
+                    track.append(corrected_feet)
+                    if len(track) > self.MAX_HISTORY: track.pop(0)
+
+                    # --- Phase 2: Geofence Check ---
+                    is_inside = cv2.pointPolygonTest(self.zone_points.astype(np.float32), 
+                                                   (float(feet_coords[0]), float(feet_coords[1])), False)
+                    
+                    color = (0, 255, 0) # Green
+                    if is_inside >= 0:
+                        color = (0, 0, 255) # Red
+                        if track_id not in self.offending_ids:
+                            self.offending_ids.add(track_id)
+                            self.violation_count += 1
+
+                    # Drawing logic
+                    cv2.circle(frame, feet_coords, 5, color, -1)
+                    cv2.putText(frame, f"ID:{track_id}", (int(x1), int(y1 - 10)), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    if len(track) > 1:
+                        pts = np.array(track).astype(np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [pts], False, color, 2)
+
+            # UI Header
+            cv2.putText(frame, f"VIOLATIONS: {self.violation_count}", (50, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+            writer.write(frame)
+            if i % 50 == 0: print(f"Processing frame {i}...")
+
+        writer.release()
+        print(f"🏁 DONE! Total Violations: {self.violation_count}")
+
+if __name__ == "__main__":
+    # GitHub relative path setup
+    DATA_PATH = "data/sequences/uav0000077_00720_v" 
+    
+    if os.path.exists(DATA_PATH):
+        guardian = AerialGuardian()
+        guardian.process_sequence(DATA_PATH)
+    else:
+        print(f"⚠️ Path not found: {DATA_PATH}. Please check your 'data' folder.")

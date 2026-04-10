@@ -1,0 +1,171 @@
+# Final Version of code with complete pipeline
+
+import cv2
+import numpy as np
+import os
+from ultralytics import YOLO
+from collections import defaultdict
+
+class AerialGuardian:
+    def __init__(self, model_path='yolov8n.pt', width=1400, height=800, conf=0.15):
+        """
+        Initialization: Consolidating Phases 0, 1.1, and 1.2
+        """
+        # Phase 0: Load the optimized Nano model
+        self.model = YOLO(model_path)
+        self.W, self.H = width, height
+        self.conf = conf
+        
+        # Phase 1.1 & 1.2: Robust Tracking & Memory Management
+        self.track_history = defaultdict(lambda: [])
+        self.MAX_HISTORY = 24  # 1 second of history at 24 FPS
+        
+        # Phase 2: Geofencing & Drift Correction State
+        self.zone_points = np.array([[550, 50], [750, 50], [900, 750], [350, 750]], np.int32)
+        self.offending_ids = set()
+        self.violation_count = 0
+        self.prev_gray = None
+        self.drone_drift = np.array([0, 0], dtype=np.float32)
+
+        # Phase 3: Velocity Analytics Constants
+        self.PIXEL_TO_METER = 0.1  # Scaling factor
+        self.FPS = 24
+
+    def _calculate_drift(self, frame):
+        """Phase 2: Farneback Optical Flow for Drone Motion Correction"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.prev_gray is not None:
+            flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            # Focus on center patch of the background/road
+            self.drone_drift = np.mean(flow[400:600, 400:1000], axis=(0, 1))
+        self.prev_gray = gray
+        return self.drone_drift
+
+    def _calculate_velocity(self, track):
+        """Phase 3: Temporal Velocity Estimation (KM/H)"""
+        if len(track) >= self.FPS:
+            # Distance moved in 1 second (24 frames)
+            prev_pos = np.array(track[-self.FPS])
+            curr_pos = np.array(track[-1])
+            pixel_dist = np.linalg.norm(curr_pos - prev_pos)
+            
+            # Conversion: Pixels -> Meters -> KM/H
+            mps = (pixel_dist * self.PIXEL_TO_METER)
+            kmh = mps * 3.6 * self.FPS
+            return int(kmh)
+        return None
+
+    def process_sequence(self, input_path, output_name='Aerial_Guardian_Final.mp4'):
+        """The Complete C4ISR Pipeline (Phases 1-3)"""
+        if not os.path.exists(input_path):
+            print(f"⚠️ Error: Path {input_path} not found.")
+            return
+
+        image_files = sorted([f for f in os.listdir(input_path) if f.endswith('.jpg')])
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_name, fourcc, self.FPS, (self.W, self.H))
+
+        print(f"🚀 Initializing Engine | Config: Conf {self.conf} | Resolution: {self.W}x{self.H}")
+
+        for i, filename in enumerate(image_files[:800]):
+            frame = cv2.imread(os.path.join(input_path, filename))
+            if frame is None: continue
+            frame = cv2.resize(frame, (self.W, self.H))
+
+            # 1. Background Drift Calculation (Phase 2)
+            drift = self._calculate_drift(frame)
+
+            # 2. Draw Geofence Overlay (Phase 2)
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [self.zone_points], (0, 0, 255))
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+            cv2.polylines(frame, [self.zone_points], True, (0, 0, 255), 3)
+
+            # 3. YOLO Tracking
+            results = self.model.track(frame, persist=True, tracker='botsort.yaml', 
+                                     imgsz=1280, classes=[0, 2], conf=self.conf, iou=0.25, verbose=False)
+
+            if results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                track_ids = results[0].boxes.id.int().cpu().tolist()
+
+                for box, track_id in zip(boxes, track_ids):
+                    x1, y1, x2, y2 = box
+                    feet_coords = (int((x1 + x2) / 2), int(y2))
+                    
+                    # Apply Drift Correction for the Trajectory Tail
+                    corrected_feet = (feet_coords[0] - drift[0], feet_coords[1] - drift[1])
+                    
+                    # Robust Tracking: Teleport Guard (Phase 1.2)
+                    track = self.track_history[track_id]
+                    if track:
+                        dist = np.linalg.norm(np.array(feet_coords) - np.array(track[-1]))
+                        if dist > 60: track.clear() # Reset if ID swap/teleport detected
+                    
+                    track.append(corrected_feet)
+                    if len(track) > self.FPS: track.pop(0)
+
+                    # 4. Velocity Calculation (Phase 3)
+                    speed = self._calculate_velocity(track)
+                    speed_text = f"{speed} km/h" if speed is not None else ""
+
+                    # 5. Geofence Check (Phase 2)
+                    is_inside = cv2.pointPolygonTest(self.zone_points.astype(np.float32), 
+                                                   (float(feet_coords[0]), float(feet_coords[1])), False)
+                    
+                    color = (0, 255, 0) # Green (Safe)
+                    if is_inside >= 0:
+                        color = (0, 0, 255) # Red (Violation)
+                        if track_id not in self.offending_ids:
+                            self.offending_ids.add(track_id)
+                            self.violation_count += 1
+
+                    # Visuals: Circles, Trajectories, and ID/Speed Tags
+                    cv2.circle(frame, feet_coords, 5, color, -1)
+                    cv2.putText(frame, f"ID:{track_id} {speed_text}", (int(x1), int(y1 - 10)), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    if len(track) > 1:
+                        pts = np.array(track).astype(np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [pts], False, color, 2)
+
+            # Final UI Overlay
+            cv2.putText(frame, f"VIOLATIONS: {self.violation_count}", (50, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+            writer.write(frame)
+            if i % 100 == 0: print(f"Processing Frame {i}/800...")
+
+        writer.release()
+        print(f"🏁 DONE! Total Violations Captured: {self.violation_count}")
+
+# ---------------------------------------------------------
+# SENSITIVITY STUDY / PARAMETER CHECK
+# ---------------------------------------------------------
+def run_parameter_check(data_path):
+    """
+    Validation logic to compare Strict vs. Balanced settings.
+    """
+    print("\n--- STARTING PARAMETER SENSITIVITY STUDY ---")
+    
+    # Case 1: Strict Configuration (High Confidence)
+    print("\n[Case 1: Strict - Conf 0.6]")
+    strict_guardian = AerialGuardian(conf=0.6)
+    strict_guardian.process_sequence(data_path, output_name='Study_Case1_Strict.mp4')
+    
+    # Case 2: Balanced Configuration (Optimized for Recall)
+    print("\n[Case 2: Balanced - Conf 0.15]")
+    balanced_guardian = AerialGuardian(conf=0.15)
+    balanced_guardian.process_sequence(data_path, output_name='Study_Case2_Balanced.mp4')
+
+if __name__ == "__main__":
+    # Path Configuration (Update this to point to your data/ folder)
+    DATA_PATH = "data/uav0000077_00720_v" 
+    
+    # Initialize the primary Guardian
+    guardian = AerialGuardian()
+    
+    # Option A: Run the main pipeline
+    guardian.process_sequence(DATA_PATH)
+    
+    # Option B: Run Sensitivity Study (Uncomment if needed)
+    # run_parameter_check(DATA_PATH)
