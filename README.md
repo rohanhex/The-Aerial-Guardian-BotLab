@@ -39,11 +39,13 @@ iv. Automatic Garbage Collection: I have implemented explicit clearing of the tr
 
 **Performance Analysis & Sensitivity:** As per requirement, the hardware specific performance and the sensitivity study of the 'noise' vs 'tracking' trade-off is below:
 
-configuration                         Precision         Recall       
-Strict [0.5 < conf < 0.7, iou = 0.7]             59%-64%           18%-20%        
-Low [0.15 < conf < 0.35, iou = 0.3]              53%-57%           26%-28%
+| Configuration | Confidence/IOU Params | Precision | Recall | F1 Score (Est.) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Strict** | `0.5 < conf < 0.7`, `iou = 0.7` | 59% - 64% | 18% - 20% | ~28% |
+| **Balanced** | `0.15 < conf < 0.35`, `iou = 0.3` | 53% - 57% | 26% - 28% | **~30%** |
 
 For our assignment I have chosen the low configuration where conf = 0.2, the precision comes out to be 57.07% while recall is 28.51% thereby making F1 score ~ 30%. This accepts a higher 'noise' (slight drop in precision)to ensure maximum situational awaeness, which is vital for search and rescue operations. 
+I chose the Balanced configuration because in drone-based search or security, missing a target (Low Recall) is often a bigger failure than dealing with occasional false detections (Low Precision).
 
 **Hardware: NVIDIA T4 x2 GPU [Kaggle Platform]
 Inference Speed: 30 FPS**
