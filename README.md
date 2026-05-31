@@ -1,6 +1,10 @@
 **The Aerial Guardian**:
 Advanced Small-Object Detection & Tracking for UAV Platforms
 
+## 🎬 Live Demo
+▶️ [Watch the Final Demo — Phase 3 Output (780 frames)](https://github.com/rohanhex/The-Aerial-Guardian-BotLab/releases/tag/v1.0)
+
+
 Project Summary: This repository contains a specialised computer vision pipeline developed for the BotLab Dynamics practical assignment. The system is designed to tacklethe three primary hurdles of aerial imagery - High Altitude, Small Target Size, and Significant Camera Motion.
 
 **Architecture & Engineering Decisions [Technical Task 1]:** For this challenge, I selected YOLOv8-Nano as the base architecture.
